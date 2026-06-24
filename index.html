@@ -360,7 +360,7 @@
         if (catF!=='all' && n.category!==catF) return false;
         if (search && !n.title?.includes(search) && !n.conditionName?.includes(search)) return false;
         return true;
-      }), [data.notifications, statusF, platF, catF, search]);
+     }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)), [data.notifications, statusF, platF, catF, search]);
 
       const shown = filtered.slice(0, page*PER);
       const unread = data.notifications.filter(n=>!n.isRead).length;
