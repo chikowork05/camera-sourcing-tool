@@ -21,7 +21,7 @@ from bs4 import BeautifulSoup
 # ───────────────────────────────────────────
 JST = timezone(timedelta(hours=9))
 NOW = datetime.now(JST)
-INDEX_HTML = Path(__file__).parent.parent / "index.html"
+INDEX_HTML = Path(__file__).parent/ "index.html"
 
 HEADERS_BASE = {
     "User-Agent": (
