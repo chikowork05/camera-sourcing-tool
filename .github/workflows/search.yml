@@ -32,7 +32,7 @@ jobs:
           pip install requests beautifulsoup4
 
       - name: 自動検索スクリプトを実行
-        run: python scripts/searcher.py
+        run: python searcher.py
 
       - name: 変更をコミット・プッシュ
         run: |
