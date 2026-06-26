@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 仕入れハンター 自動検索スクリプト
-ヤフオク・メルカリを検索して新着商品を通知としてindex.htmlに書き込む
+ヤフオク・メルカリ・ラクマを検索して新着商品を通知としてindex.htmlに書き込む
 """
 
 import json
@@ -11,6 +11,7 @@ import random
 import hashlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -19,7 +20,7 @@ JST = timezone(timedelta(hours=9))
 NOW = datetime.now(JST)
 INDEX_HTML = Path(__file__).parent / "index.html"
 
-HEADERS = {
+HEADERS_HTML = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -57,8 +58,70 @@ def judge(title):
     return "NG", "OKワードなし"
 
 
+def make_item(cond, platform, title, url, price, img_url):
+    j, reason = judge(title)
+    return {
+        "id": gen_id(url),
+        "conditionId": cond["id"],
+        "conditionName": cond["name"],
+        "category": cond.get("category", "フィルムカメラ"),
+        "platform": platform,
+        "title": title,
+        "url": url,
+        "imageUrl": img_url,
+        "price": price,
+        "judgment": j,
+        "reason": reason,
+        "createdAt": NOW.isoformat(),
+        "isRead": False,
+        "isFavorite": False,
+    }
+
+
 def sleep():
     time.sleep(random.uniform(2.0, 4.0))
+
+
+# ───────────────────────────────────────────
+# URLからキーワード・価格上限を抽出するユーティリティ
+# ───────────────────────────────────────────
+def extract_keyword_from_url(url):
+    """searchUrlからキーワードを抽出する"""
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    # ヤフオク: p or va
+    for key in ["p", "va", "keyword"]:
+        if key in qs:
+            return qs[key][0]
+    return ""
+
+def extract_max_price_from_url(url):
+    """searchUrlから価格上限を抽出する"""
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    for key in ["aucmaxprice", "max", "price_max"]:
+        if key in qs and qs[key][0]:
+            try:
+                return int(qs[key][0])
+            except Exception:
+                pass
+    return 0
+
+def extract_category_id_from_url(url):
+    """メルカリURLからcategory_idを抽出する"""
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    if "category_id" in qs:
+        return qs["category_id"][0]
+    return ""
+
+def extract_exclude_keyword_from_url(url):
+    """ヤフオクURLからve（除外キーワード）を抽出する"""
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    if "ve" in qs:
+        return qs["ve"][0]
+    return ""
 
 
 # ───────────────────────────────────────────
@@ -68,11 +131,10 @@ def search_yahoo(cond):
     url = cond["searchUrl"]
     results = []
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        r = requests.get(url, headers=HEADERS_HTML, timeout=20)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # 商品リストを取得（複数のセレクタを試す）
         items = (
             soup.select("li.Product") or
             soup.select("div.Product") or
@@ -80,7 +142,6 @@ def search_yahoo(cond):
             soup.select("li[class*='product']")
         )
 
-        # セレクタで取れない場合はaタグから直接探す
         if not items:
             links = soup.select("a[href*='page.auctions.yahoo.co.jp']")
             for a in links[:30]:
@@ -88,42 +149,20 @@ def search_yahoo(cond):
                 item_url = a.get("href", "")
                 if not title_text or not item_url:
                     continue
-                j, reason = judge(title_text)
-                results.append({
-                    "id": gen_id(item_url),
-                    "conditionId": cond["id"],
-                    "conditionName": cond["name"],
-                    "category": cond.get("category", "フィルムカメラ"),
-                    "platform": "ヤフオク",
-                    "title": title_text,
-                    "url": item_url,
-                    "imageUrl": "",
-                    "price": 0,
-                    "judgment": j,
-                    "reason": reason,
-                    "createdAt": NOW.isoformat(),
-                    "isRead": False,
-                    "isFavorite": False,
-                })
+                results.append(make_item(cond, "ヤフオク", title_text, item_url, 0, ""))
             return results
 
         for item in items[:30]:
-            # タイトル取得
             title_el = (
                 item.select_one(".Product__title") or
                 item.select_one("[class*='Product__title']") or
-                item.select_one("h3") or
-                item.select_one("h2")
+                item.select_one("h3") or item.select_one("h2")
             )
             title_text = title_el.get_text(strip=True) if title_el else ""
-
-            # URL取得
             a_el = item.select_one("a[href*='auctions.yahoo']") or item.select_one("a")
             item_url = a_el.get("href", "") if a_el else ""
             if not item_url.startswith("http"):
                 item_url = "https://auctions.yahoo.co.jp" + item_url
-
-            # 価格取得
             price = 0
             price_el = item.select_one(".Product__price") or item.select_one("[class*='price']")
             if price_el:
@@ -131,31 +170,11 @@ def search_yahoo(cond):
                     price = int(re.sub(r"[^\d]", "", price_el.get_text()))
                 except Exception:
                     pass
-
-            # 画像取得
             img_el = item.select_one("img")
             img_url = img_el.get("src", "") if img_el else ""
-
             if not title_text or not item_url:
                 continue
-
-            j, reason = judge(title_text)
-            results.append({
-                "id": gen_id(item_url),
-                "conditionId": cond["id"],
-                "conditionName": cond["name"],
-                "category": cond.get("category", "フィルムカメラ"),
-                "platform": "ヤフオク",
-                "title": title_text,
-                "url": item_url,
-                "imageUrl": img_url,
-                "price": price,
-                "judgment": j,
-                "reason": reason,
-                "createdAt": NOW.isoformat(),
-                "isRead": False,
-                "isFavorite": False,
-            })
+            results.append(make_item(cond, "ヤフオク", title_text, item_url, price, img_url))
 
     except Exception as e:
         print(f"  [ヤフオク] {cond['name']}: エラー - {e}")
@@ -163,95 +182,131 @@ def search_yahoo(cond):
 
 
 # ───────────────────────────────────────────
-# メルカリ検索（HTML）
+# メルカリ検索（非公式API）
 # ───────────────────────────────────────────
 def search_mercari(cond):
-    url = cond["searchUrl"]
     results = []
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        keyword = extract_keyword_from_url(cond["searchUrl"])
+        price_max = extract_max_price_from_url(cond["searchUrl"])
+        category_id = extract_category_id_from_url(cond["searchUrl"])
+
+        if not keyword:
+            print(f"  [メルカリ] {cond['name']}: キーワード抽出失敗")
+            return results
+
+        # メルカリ非公式API
+        api_url = "https://api.mercari.jp/v2/entities:search"
+        payload = {
+            "pageSize": 30,
+            "searchSessionId": gen_id(keyword),
+            "indexRouting": "INDEX_ROUTING_UNSPECIFIED",
+            "thumbnailTypes": [],
+            "searchCondition": {
+                "keyword": keyword,
+                "excludeKeyword": "",
+                "sort": "SORT_CREATED_TIME",
+                "order": "ORDER_DESC",
+                "status": ["STATUS_ON_SALE"],
+                "categoryId": [category_id] if category_id else [],
+                "brandId": [],
+                "sellerId": [],
+                "priceMin": 0,
+                "priceMax": price_max if price_max else 0,
+                "itemConditionId": [],
+                "shippingPayerId": [],
+                "shippingFromArea": [],
+                "shippingMethod": [],
+                "colorId": [],
+                "hasCoupon": False,
+                "attributes": [],
+                "itemTypes": [],
+                "skuIds": [],
+            },
+            "defaultDatasets": ["DATASET_TYPE_MERCARI", "DATASET_TYPE_BEYOND"],
+            "serviceFrom": "suruga",
+            "userId": "",
+            "withItemBrand": True,
+            "withItemSize": False,
+            "withItemPromotions": False,
+            "withItemSizes": False,
+            "withShopname": False,
+        }
+        headers = {
+            **HEADERS_HTML,
+            "Content-Type": "application/json",
+            "X-Platform": "web",
+            "Accept": "application/json",
+            "DPoP": "dummy",
+        }
+        r = requests.post(api_url, json=payload, headers=headers, timeout=20)
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
+        data = r.json()
 
-        # JSON-LDから取得を試みる
-        for script in soup.find_all("script", type="application/ld+json"):
+        items = data.get("items", [])
+        for item in items:
+            title_text = item.get("name", "")
+            item_id = item.get("id", "")
+            item_url = f"https://jp.mercari.com/item/{item_id}" if item_id else ""
             try:
-                data = json.loads(script.string or "")
-                items = data if isinstance(data, list) else [data]
-                for item in items:
-                    if item.get("@type") != "Product":
-                        continue
-                    title_text = item.get("name", "")
-                    item_url = item.get("url", "")
-                    try:
-                        price = int(item.get("offers", {}).get("price", 0))
-                    except Exception:
-                        price = 0
-                    img_url = item.get("image", "")
-                    if isinstance(img_url, list):
-                        img_url = img_url[0] if img_url else ""
-                    if not title_text:
-                        continue
-                    j, reason = judge(title_text)
-                    results.append({
-                        "id": gen_id(item_url),
-                        "conditionId": cond["id"],
-                        "conditionName": cond["name"],
-                        "category": cond.get("category", "フィルムカメラ"),
-                        "platform": "メルカリ",
-                        "title": title_text,
-                        "url": item_url,
-                        "imageUrl": img_url,
-                        "price": price,
-                        "judgment": j,
-                        "reason": reason,
-                        "createdAt": NOW.isoformat(),
-                        "isRead": False,
-                        "isFavorite": False,
-                    })
+                price = int(item.get("price", 0))
             except Exception:
-                pass
-
-        # JSON-LDで取れなければHTMLから
-        if not results:
-            for item in soup.select("li[data-testid='item-cell'], [class*='items__item']")[:30]:
-                a_el = item.select_one("a")
-                if not a_el:
-                    continue
-                title_text = a_el.get("aria-label", "") or a_el.get_text(strip=True)
-                href = a_el.get("href", "")
-                item_url = href if href.startswith("http") else "https://jp.mercari.com" + href
-                img_el = item.select_one("img")
-                img_url = img_el.get("src", "") if img_el else ""
                 price = 0
-                price_el = item.select_one("[class*='price']")
-                if price_el:
-                    try:
-                        price = int(re.sub(r"[^\d]", "", price_el.get_text()))
-                    except Exception:
-                        pass
-                if not title_text:
-                    continue
-                j, reason = judge(title_text)
-                results.append({
-                    "id": gen_id(item_url),
-                    "conditionId": cond["id"],
-                    "conditionName": cond["name"],
-                    "category": cond.get("category", "フィルムカメラ"),
-                    "platform": "メルカリ",
-                    "title": title_text,
-                    "url": item_url,
-                    "imageUrl": img_url,
-                    "price": price,
-                    "judgment": j,
-                    "reason": reason,
-                    "createdAt": NOW.isoformat(),
-                    "isRead": False,
-                    "isFavorite": False,
-                })
+            thumbnails = item.get("thumbnails", [])
+            img_url = thumbnails[0] if thumbnails else ""
+            if not title_text or not item_url:
+                continue
+            results.append(make_item(cond, "メルカリ", title_text, item_url, price, img_url))
 
     except Exception as e:
         print(f"  [メルカリ] {cond['name']}: エラー - {e}")
+    return results
+
+
+# ───────────────────────────────────────────
+# ラクマ検索（非公式API）
+# ───────────────────────────────────────────
+def search_rakuma(cond):
+    results = []
+    try:
+        keyword = extract_keyword_from_url(cond["searchUrl"]) or cond["name"]
+        price_max = extract_max_price_from_url(cond["searchUrl"])
+
+        api_url = "https://api.fril.jp/v1/items"
+        params = {
+            "keyword": keyword,
+            "limit": 30,
+            "sort": "created_at",
+            "order": "desc",
+            "status": "on_sale",
+        }
+        if price_max:
+            params["price_to"] = price_max
+
+        headers = {
+            **HEADERS_HTML,
+            "Accept": "application/json",
+        }
+        r = requests.get(api_url, params=params, headers=headers, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+
+        items = data.get("items", [])
+        for item in items:
+            title_text = item.get("name", "")
+            item_id = item.get("id", "")
+            item_url = f"https://fril.jp/items/{item_id}" if item_id else ""
+            try:
+                price = int(item.get("price", 0))
+            except Exception:
+                price = 0
+            img_url = item.get("image_url", "") or item.get("images", [{}])[0].get("url", "")
+            if not title_text or not item_url:
+                continue
+            results.append(make_item(cond, "ラクマ", title_text, item_url, price, img_url))
+
+    except Exception as e:
+        print(f"  [ラクマ] {cond['name']}: エラー - {e}")
     return results
 
 
@@ -310,6 +365,8 @@ def main():
             results = search_yahoo(cond)
         elif platform == "メルカリ":
             results = search_mercari(cond)
+        elif platform == "ラクマ":
+            results = search_rakuma(cond)
         else:
             results = []
 
