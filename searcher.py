@@ -352,7 +352,16 @@ def main():
     search_conditions = data.get("searchConditions", [])
     existing_notis = data.get("notifications", [])
     existing_urls = {n.get("url", "") for n in existing_notis}
-
+# ラクマテスト用（動作確認後に削除）
+test_rakuma = {
+    "id": "test-rakuma-001",
+    "name": "Olympus Trip35 ラクマテスト",
+    "platform": "ラクマ",
+    "searchUrl": "https://fril.jp/search?query=olympus+trip+35&max_price=6000",
+    "category": "フィルムカメラ",
+    "enabled": True,
+}
+search_conditions = [test_rakuma] + search_conditions
     active_conds = [c for c in search_conditions if c.get("enabled", True)]
     print(f"検索条件: {len(active_conds)}件 (全{len(search_conditions)}件中)")
 
